@@ -4,6 +4,10 @@ RAG系统配置文件
 
 from dataclasses import dataclass
 from typing import Dict, Any
+from pathlib import Path
+
+
+BASE_DIR = Path(__file__).resolve().parent
 
 @dataclass
 class RAGConfig:
@@ -15,7 +19,7 @@ class RAGConfig:
 
     # 模型配置
     embedding_model: str = "BAAI/bge-small-zh-v1.5"
-    llm_model: str = "kimi-k2-0711-preview"
+    llm_model: str = "deepseek-chat"
 
     # 检索配置
     top_k: int = 3
@@ -26,7 +30,16 @@ class RAGConfig:
 
     def __post_init__(self):
         """初始化后的处理"""
-        pass
+        self.data_path = str(self._resolve_path(self.data_path))
+        self.index_save_path = str(self._resolve_path(self.index_save_path))
+
+    @staticmethod
+    def _resolve_path(path_value: str) -> Path:
+        """将配置路径解析为相对于当前配置文件的绝对路径。"""
+        path = Path(path_value)
+        if path.is_absolute():
+            return path
+        return (BASE_DIR / path).resolve()
     
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> 'RAGConfig':

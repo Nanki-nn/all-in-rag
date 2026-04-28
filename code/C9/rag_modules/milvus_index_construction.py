@@ -3,6 +3,7 @@ Milvus索引构建模块
 """
 
 import logging
+import os
 import time
 from typing import List, Dict, Any, Optional
 
@@ -63,10 +64,15 @@ class MilvusIndexConstructionModule:
     def _setup_client(self):
         """初始化Milvus客户端"""
         try:
-            self.client = MilvusClient(
-                uri=f"http://{self.host}:{self.port}"
-            )
-            logger.info(f"已连接到Milvus服务器: {self.host}:{self.port}")
+            milvus_uri = os.getenv("MILVUS_LITE_URI")
+            if milvus_uri:
+                self.client = MilvusClient(uri=milvus_uri)
+                logger.info(f"已连接到本地Milvus Lite: {milvus_uri}")
+            else:
+                self.client = MilvusClient(
+                    uri=f"http://{self.host}:{self.port}"
+                )
+                logger.info(f"已连接到Milvus服务器: {self.host}:{self.port}")
             
             # 测试连接
             collections = self.client.list_collections()
@@ -176,12 +182,8 @@ class MilvusIndexConstructionModule:
             # 添加向量字段索引
             index_params.add_index(
                 field_name="vector",
-                index_type="HNSW",
+                index_type="AUTOINDEX",
                 metric_type="COSINE",
-                params={
-                    "M": 16,
-                    "efConstruction": 200
-                }
             )
             
             self.client.create_index(

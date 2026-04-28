@@ -5,9 +5,10 @@
 import os
 import logging
 from typing import List
+import unicodedata
 
 from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
-from langchain_community.chat_models.moonshot import MoonshotChat
+from langchain_community.chat_models.openai import ChatOpenAI
 from langchain_core.documents import Document
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 class GenerationIntegrationModule:
     """生成集成模块 - 负责LLM集成和回答生成"""
     
-    def __init__(self, model_name: str = "kimi-k2-0711-preview", temperature: float = 0.1, max_tokens: int = 2048):
+    def __init__(self, model_name: str = "deepseek-chat", temperature: float = 0.1, max_tokens: int = 2048):
         """
         初始化生成集成模块
         
@@ -31,20 +32,47 @@ class GenerationIntegrationModule:
         self.max_tokens = max_tokens
         self.llm = None
         self.setup_llm()
+
+    @staticmethod
+    def normalize_query_text(query: str) -> str:
+        """规范化查询文本，移除容易触发编码问题的装饰性字符。"""
+        normalized = unicodedata.normalize("NFKC", query or "")
+        cleaned_chars = []
+
+        for ch in normalized:
+            category = unicodedata.category(ch)
+
+            if ch.isspace():
+                cleaned_chars.append(" ")
+                continue
+
+            # 过滤控制字符、代理项、私有区、格式控制符
+            if category in {"Cc", "Cs", "Co", "Cf"}:
+                continue
+
+            # 过滤大多数 emoji / 装饰性符号，避免底层链路回退到 ascii 时出错
+            if category == "So":
+                continue
+
+            cleaned_chars.append(ch)
+
+        cleaned = " ".join("".join(cleaned_chars).split())
+        return cleaned or normalized.strip()
     
     def setup_llm(self):
         """初始化大语言模型"""
         logger.info(f"正在初始化LLM: {self.model_name}")
 
-        api_key = os.getenv("MOONSHOT_API_KEY")
+        api_key = os.getenv("DEEPSEEK_API_KEY")
         if not api_key:
-            raise ValueError("请设置 MOONSHOT_API_KEY 环境变量")
+            raise ValueError("请设置 DEEPSEEK_API_KEY 环境变量")
 
-        self.llm = MoonshotChat(
+        self.llm = ChatOpenAI(
             model=self.model_name,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
-            moonshot_api_key=api_key
+            api_key=api_key,
+            base_url="https://api.deepseek.com/v1"
         )
         
         logger.info("LLM初始化完成")
@@ -148,6 +176,10 @@ class GenerationIntegrationModule:
         Returns:
             重写后的查询或原查询
         """
+        safe_query = self.normalize_query_text(query)
+        if safe_query != query:
+            logger.info(f"查询已规范化: '{query}' -> '{safe_query}'")
+
         prompt = PromptTemplate(
             template="""
 你是一个智能查询分析助手。请分析用户的查询，判断是否需要重写以提高食谱搜索效果。
@@ -190,15 +222,19 @@ class GenerationIntegrationModule:
             | StrOutputParser()
         )
 
-        response = chain.invoke(query).strip()
+        try:
+            response = chain.invoke(safe_query).strip()
+        except Exception as exc:
+            logger.warning(f"查询重写失败，回退到原查询: {exc}")
+            return safe_query
 
         # 记录重写结果
-        if response != query:
-            logger.info(f"查询已重写: '{query}' → '{response}'")
+        if response != safe_query:
+            logger.info(f"查询已重写: '{safe_query}' → '{response}'")
         else:
-            logger.info(f"查询无需重写: '{query}'")
+            logger.info(f"查询无需重写: '{safe_query}'")
 
-        return response
+        return response or safe_query
 
 
 
@@ -212,6 +248,27 @@ class GenerationIntegrationModule:
         Returns:
             路由类型 ('list', 'detail', 'general')
         """
+        safe_query = self.normalize_query_text(query)
+        normalized_query = safe_query.strip().lower()
+
+        # 对明显的推荐/列表查询优先使用规则判断，避免额外的模型调用延迟。
+        list_keywords = [
+            "推荐", "几个", "哪些", "有什么", "有啥", "来点", "菜单", "菜品",
+            "适合", "想吃", "选什么", "吃什么"
+        ]
+        if any(keyword in normalized_query for keyword in list_keywords):
+            logger.info(f"查询路由命中本地规则(list): '{safe_query}'")
+            return "list"
+
+        # 对明显的步骤/食材查询也优先使用规则判断。
+        detail_keywords = [
+            "怎么做", "如何做", "做法", "步骤", "需要什么", "食材",
+            "原料", "怎么炒", "怎么煮", "教程"
+        ]
+        if any(keyword in normalized_query for keyword in detail_keywords):
+            logger.info(f"查询路由命中本地规则(detail): '{safe_query}'")
+            return "detail"
+
         prompt = ChatPromptTemplate.from_template("""
 根据用户的问题，将其分类为以下三种类型之一：
 
@@ -237,7 +294,7 @@ class GenerationIntegrationModule:
             | StrOutputParser()
         )
 
-        result = chain.invoke(query).strip().lower()
+        result = chain.invoke(safe_query).strip().lower()
 
         # 确保返回有效的路由类型
         if result in ['list', 'detail', 'general']:

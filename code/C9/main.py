@@ -9,12 +9,14 @@ import time
 import logging
 from typing import List, Optional
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # 设置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # 添加当前目录到Python路径
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(BASE_DIR)
 
 from dotenv import load_dotenv
 from config import DEFAULT_CONFIG, GraphRAGConfig
@@ -28,7 +30,7 @@ from rag_modules.graph_rag_retrieval import GraphRAGRetrieval
 from rag_modules.intelligent_query_router import IntelligentQueryRouter, QueryAnalysis
 
 # 加载环境变量
-load_dotenv()
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 class AdvancedGraphRAGSystem:
     """
@@ -346,6 +348,8 @@ class AdvancedGraphRAGSystem:
                     print(f"{result}\n")
                 
             except KeyboardInterrupt:
+                break
+            except EOFError:
                 break
             except Exception as e:
                 print(f"处理问题时出错: {e}")

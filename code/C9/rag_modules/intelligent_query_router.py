@@ -7,6 +7,7 @@
 
 import json
 import logging
+import re
 from typing import List, Dict, Tuple, Any, Optional
 from dataclasses import dataclass
 from enum import Enum
@@ -99,7 +100,7 @@ class IntelligentQueryRouter:
         - graph_rag: 适合复杂关系推理和知识发现
         - combined: 需要两种策略结合
         
-        返回JSON格式：
+        只返回JSON对象，不要添加Markdown代码块或解释文字：
         {{
             "query_complexity": 0.6,
             "relationship_intensity": 0.8,
@@ -119,16 +120,17 @@ class IntelligentQueryRouter:
                 max_tokens=800
             )
             
-            result = json.loads(response.choices[0].message.content.strip())
+            raw_content = response.choices[0].message.content.strip()
+            result = self._parse_json_response(raw_content)
             
             analysis = QueryAnalysis(
-                query_complexity=result.get("query_complexity", 0.5),
-                relationship_intensity=result.get("relationship_intensity", 0.5),
-                reasoning_required=result.get("reasoning_required", False),
-                entity_count=result.get("entity_count", 1),
-                recommended_strategy=SearchStrategy(result.get("recommended_strategy", "hybrid_traditional")),
-                confidence=result.get("confidence", 0.5),
-                reasoning=result.get("reasoning", "默认分析")
+                query_complexity=self._clamp_score(result.get("query_complexity"), 0.5),
+                relationship_intensity=self._clamp_score(result.get("relationship_intensity"), 0.5),
+                reasoning_required=bool(result.get("reasoning_required", False)),
+                entity_count=max(1, int(result.get("entity_count", 1) or 1)),
+                recommended_strategy=self._safe_strategy(result.get("recommended_strategy", "hybrid_traditional")),
+                confidence=self._clamp_score(result.get("confidence"), 0.5),
+                reasoning=str(result.get("reasoning", "默认分析"))
             )
             
             logger.info(f"查询分析完成: {analysis.recommended_strategy.value} (置信度: {analysis.confidence:.2f})")
@@ -138,17 +140,61 @@ class IntelligentQueryRouter:
             logger.error(f"查询分析失败: {e}")
             # 降级方案：基于规则的简单分析
             return self._rule_based_analysis(query)
+
+    def _parse_json_response(self, content: str) -> Dict[str, Any]:
+        """从LLM返回中提取JSON对象，兼容Markdown代码块和前后解释文本。"""
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            pass
+
+        fenced_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
+        if fenced_match:
+            return json.loads(fenced_match.group(1))
+
+        object_match = re.search(r"\{.*\}", content, re.DOTALL)
+        if object_match:
+            return json.loads(object_match.group(0))
+
+        raise ValueError(f"无法从LLM响应中解析JSON: {content[:200]}")
+
+    @staticmethod
+    def _clamp_score(value, default: float = 0.5) -> float:
+        """把模型返回的分数限制到0到1之间。"""
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            return default
+        return max(0.0, min(1.0, score))
+
+    @staticmethod
+    def _safe_strategy(value) -> SearchStrategy:
+        """把模型返回的策略转换为枚举，失败时回退到组合检索。"""
+        try:
+            return SearchStrategy(str(value))
+        except ValueError:
+            return SearchStrategy.COMBINED
     
     def _rule_based_analysis(self, query: str) -> QueryAnalysis:
         """基于规则的降级分析"""
         # 简单的规则判断
-        complexity_keywords = ["为什么", "如何", "关系", "影响", "原因", "比较", "区别"]
-        relation_keywords = ["配", "搭配", "组合", "相关", "联系", "连接"]
+        complexity_keywords = [
+            "为什么", "如何", "关系", "影响", "原因", "比较", "区别",
+            "形成", "历史", "地理", "演变", "发展", "导致", "关联"
+        ]
+        relation_keywords = [
+            "关系", "关联", "相关", "联系", "连接", "影响",
+            "配", "搭配", "组合", "与", "和", "之间"
+        ]
         
-        complexity = sum(1 for kw in complexity_keywords if kw in query) / len(complexity_keywords)
-        relation_intensity = sum(1 for kw in relation_keywords if kw in query) / len(relation_keywords)
+        complexity_hits = sum(1 for kw in complexity_keywords if kw in query)
+        relation_hits = sum(1 for kw in relation_keywords if kw in query)
+        complexity = min(1.0, complexity_hits / 4)
+        relation_intensity = min(1.0, relation_hits / 4)
         
-        if complexity > 0.3 or relation_intensity > 0.3:
+        if complexity >= 0.5 and relation_intensity >= 0.5:
+            strategy = SearchStrategy.COMBINED
+        elif complexity > 0.3 or relation_intensity > 0.3:
             strategy = SearchStrategy.GRAPH_RAG
         else:
             strategy = SearchStrategy.HYBRID_TRADITIONAL

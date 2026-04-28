@@ -38,6 +38,10 @@ ENV/
 *.log
 logs/
 
+# Local vector/database runtime files
+*.db
+*.db.lock
+
 # Jupyter Notebook
 .ipynb_checkpoints
 
